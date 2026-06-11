@@ -1,0 +1,66 @@
+terraform {
+  required_version = ">= 1.5.0"
+  required_providers {
+    vsphere = {
+      source  = "hashicorp/vsphere"
+      version = "~> 2.6.0" # 建议使用支持 vSphere 8/VCF 9 的最新版本
+    }
+    kubectl = {
+      source  = "gavinbunney/kubectl"
+      version = "~> 1.14.0"
+    }
+  }
+}
+
+# 1. 认证到 vCenter（用于获取底座基础设施信息）
+provider "vsphere" {
+  user                 = var.vsphere_user
+  password             = var.vsphere_password
+  vsphere_server       = var.vsphere_server
+  allow_unverified_ssl = true
+}
+
+# 2. 认证到 Supervisor 集群的 API Server
+# 注意：此处的 Kubeconfig 或 Token 需要提前通过 vSphere CLI (kubectl vsphere login) 获取
+provider "kubectl" {
+  host                   = "https://<SUPERVISOR-CTRL-PLANE-IP>"
+  token                  = var.supervisor_token
+  cluster_ca_certificate = base64decode(var.supervisor_ca_cert)
+  load_config_file       = false
+}
+
+# 3. 读取已有的 vSphere 命名空间（作为 VKS 的宿主）
+data "vsphere" "namespace" {
+  # 用于确保底座环境正常连接
+}
+
+# 4. 通过 Kubectl Provider 在 Supervisor 中声明 VKS 集群 (TanzuKubernetesCluster)
+resource "kubectl_manifest" "vks_cluster" {
+  yaml_body = <<YAML
+apiVersion: run.tanzu.vmware.com/v1alpha3
+kind: TanzuKubernetesCluster
+metadata:
+  name: vks-prod-cluster
+  namespace: dev-team-01 # 你的 vSphere Namespace 名称
+spec:
+  topology:
+    controlPlane:
+      replicas: 3 # 控制节点数量（生产建议3节点高可用）
+      vmClass: best-effort-medium # 虚拟机规格（在 Namespace 中定义的 VM Class）
+      storageClass: vcf-vsan-storage-policy # 绑定的存储策略
+    workers:
+      replicas: 5 # 工作节点数量
+      vmClass: best-effort-large
+      storageClass: vcf-vsan-storage-policy
+  distribution:
+    version: v1.26 # 想要部署的 Kubernetes 版本（必须在 Content Library 中存在）
+  settings:
+    network:
+      cni:
+        name: antrea # VCF 默认的内建 CNI
+      services:
+        cidrBlocks: ["10.96.0.0/12"]
+      pods:
+        cidrBlocks: ["192.168.0.0/16"]
+YAML
+}
